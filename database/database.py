@@ -115,10 +115,16 @@ class MongoDatabase:
         return await self.db.channels.find_one({"channel_id": channel_id})
 
     async def save_channel(
-        self, channel_id: int, title: str, username: str, description: str
+        self,
+        channel_id: int,
+        title: str,
+        username: str,
+        description: str,
+        button_text: Optional[str] = None,
     ) -> str:
         existing = await self.db.channels.find_one({"channel_id": channel_id})
         doc_id = existing["_id"] if existing else new_id()
+        button_text = button_text or (existing or {}).get("button_text") or title
         await self.db.channels.update_one(
             {"_id": doc_id},
             {
@@ -127,6 +133,7 @@ class MongoDatabase:
                     "title": title,
                     "username": username or "",
                     "description": description,
+                    "button_text": button_text,
                     "active": True,
                     "updated_at": utcnow(),
                 },
@@ -139,6 +146,11 @@ class MongoDatabase:
     async def update_channel(self, doc_id: str, **values: Any) -> None:
         values["updated_at"] = utcnow()
         await self.db.channels.update_one({"_id": doc_id}, {"$set": values})
+
+    async def delete_channel(self, doc_id: str) -> None:
+        """Remove a channel and its plans while preserving subscription history."""
+        await self.db.plans.delete_many({"channel_id": doc_id})
+        await self.db.channels.delete_one({"_id": doc_id})
 
     async def list_plans(self, channel_id: str, active_only: bool = True) -> list[dict]:
         query: dict[str, Any] = {"channel_id": channel_id}
@@ -249,6 +261,24 @@ class MongoDatabase:
     async def update_subscription(self, sub_id: str, values: dict[str, Any]) -> None:
         values["updated_at"] = utcnow()
         await self.db.subscriptions.update_one({"_id": sub_id}, {"$set": values})
+
+    async def claim_pending_join(
+        self, sub_id: str, starts_at: datetime, ends_at: Optional[datetime]
+    ) -> bool:
+        """Atomically turn one pending invite into an active membership."""
+        result = await self.db.subscriptions.update_one(
+            {"_id": sub_id, "status": "pending_join"},
+            {
+                "$set": {
+                    "status": "active",
+                    "starts_at": starts_at,
+                    "ends_at": ends_at,
+                    "invite_link": None,
+                    "updated_at": utcnow(),
+                }
+            },
+        )
+        return result.modified_count == 1
 
     async def terminate_user_subscriptions(
         self, user_id: int, channel_id: Optional[int] = None
