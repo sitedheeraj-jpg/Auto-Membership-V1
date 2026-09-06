@@ -13,6 +13,9 @@ This is a clean replacement for the uploaded source. It uses:
 - Zero-price plans shown as `FREE` and granted without a payment screen
 - Single-use, time-limited Telegram invite links
 - Join detection, invite revocation, expiry reminders, and automatic removal after expiry
+- Custom user-facing channel button labels, active/paused status colors, and two-step channel deletion
+- Safe navigation from both text and photo-based `/start` screens
+- Join activation cleanup: the earlier invite message is deleted before the final access-confirmation message
 
 ## Railway deployment
 
@@ -25,6 +28,28 @@ This is a clean replacement for the uploaded source. It uses:
    - restrict/ban members;
    - receive `chat_member` updates.
 5. Start the service. Send `/start` to the bot as the owner, open **Admin panel**, add a channel by numeric ID, then add its plans.
+
+## API ID and API hash
+
+This implementation intentionally uses Telegram's Bot API through
+`python-telegram-bot`. An `api_id` and `api_hash` belong to Telegram's
+MTProto client API (Telethon/Pyrogram); they do not make Bot API polling,
+callback queries, invite links, or `chat_member` updates faster. Adding them
+would require a separate user-session client and would add another connection,
+session file, rate-limit surface, and credential to Railway without improving
+this bot's throughput. The async Bot API implementation already processes
+independent updates concurrently.
+
+## Channel manager controls
+
+Open **Admin panel → Channels → a channel** to:
+
+- pause or activate the channel; the button itself shows green `Active` or red
+  `Paused`;
+- edit the label users see in **Browse channels** without changing the
+  Telegram channel title;
+- delete the channel from the catalogue. The panel asks for a second
+  confirmation, removes its plans, and preserves old subscription history.
 
 ## Admin commands
 
@@ -53,4 +78,7 @@ emoji fallbacks for older Telegram clients that ignore the style field.
 
 ## Security
 
-Do not commit a real MongoDB URI or payment credential. The credentials included in the original request are now exposed in chat history; rotate the MongoDB password and any provider key before production, then place the replacement values only in Railway Variables.
+Do not commit a real MongoDB URI, payment credential, or bot token. The
+credentials included in the original request and the uploaded log are exposed;
+rotate the bot token with BotFather, the MongoDB password, and any provider key
+before production, then place replacement values only in Railway Variables.
