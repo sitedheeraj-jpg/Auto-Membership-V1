@@ -67,12 +67,52 @@ class MongoDatabase:
             upsert=True,
         )
 
+    async def get_user(self, telegram_id: int) -> Optional[dict]:
+        return await self.db.users.find_one({"telegram_id": telegram_id})
+
+    async def list_premium_users(self) -> list[dict]:
+        user_ids = await self.db.subscriptions.distinct(
+            "user_id",
+            {
+                "status": {
+                    "$in": ["active", "pending_join", "expired", "terminated"]
+                }
+            },
+        )
+        if not user_ids:
+            return []
+        return await self.db.users.find(
+            {"telegram_id": {"$in": user_ids}}
+        ).sort([("first_name", 1), ("telegram_id", 1)]).to_list(500)
+
+    async def list_user_subscriptions(self, telegram_id: int) -> list[dict]:
+        return await self.db.subscriptions.find(
+            {"user_id": telegram_id}
+        ).sort("created_at", -1).to_list(200)
+
+    async def get_subscription(self, sub_id: str) -> Optional[dict]:
+        return await self.db.subscriptions.find_one({"_id": sub_id})
+
+    async def get_setting(self, key: str, default: Any = None) -> Any:
+        document = await self.db.settings.find_one({"_id": "global"})
+        return document.get(key, default) if document else default
+
+    async def set_setting(self, key: str, value: Any) -> None:
+        await self.db.settings.update_one(
+            {"_id": "global"},
+            {"$set": {key: value, "updated_at": utcnow()}},
+            upsert=True,
+        )
+
     async def list_channels(self, active_only: bool = True) -> list[dict]:
         query = {"active": True} if active_only else {}
         return await self.db.channels.find(query).sort("title", 1).to_list(200)
 
     async def get_channel(self, channel_id: str) -> Optional[dict]:
         return await self.db.channels.find_one({"_id": channel_id})
+
+    async def get_channel_by_telegram_id(self, channel_id: int) -> Optional[dict]:
+        return await self.db.channels.find_one({"channel_id": channel_id})
 
     async def save_channel(
         self, channel_id: int, title: str, username: str, description: str
@@ -209,6 +249,29 @@ class MongoDatabase:
     async def update_subscription(self, sub_id: str, values: dict[str, Any]) -> None:
         values["updated_at"] = utcnow()
         await self.db.subscriptions.update_one({"_id": sub_id}, {"$set": values})
+
+    async def terminate_user_subscriptions(
+        self, user_id: int, channel_id: Optional[int] = None
+    ) -> list[dict]:
+        query: dict[str, Any] = {
+            "user_id": user_id,
+            "status": {"$in": ["active", "pending_join"]},
+        }
+        if channel_id is not None:
+            query["channel_id"] = channel_id
+        records = await self.db.subscriptions.find(query).to_list(200)
+        if records:
+            await self.db.subscriptions.update_many(
+                {"_id": {"$in": [record["_id"] for record in records]}},
+                {
+                    "$set": {
+                        "status": "terminated",
+                        "terminated_at": utcnow(),
+                        "updated_at": utcnow(),
+                    }
+                },
+            )
+        return records
 
     async def active_expiring(self, before: datetime) -> list[dict]:
         return await self.db.subscriptions.find(
