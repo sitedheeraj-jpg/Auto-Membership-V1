@@ -7,6 +7,10 @@ This is a clean replacement for the uploaded source. It uses:
 - MongoDB through Motor
 - Dynamic UPI QR codes with the VC Payment API
 - Admin panel for channels, descriptions, plans, prices, durations, and support contact
+- Premium-user directory with per-user purchase history and manual termination
+- `/addpremium <channel_id> <user_id> <duration_days>` and `/removepremium <channel_id> <user_id>`
+- Editable `/start` HTML welcome text and optional welcome photo
+- Zero-price plans shown as `FREE` and granted without a payment screen
 - Single-use, time-limited Telegram invite links
 - Join detection, invite revocation, expiry reminders, and automatic removal after expiry
 
@@ -22,6 +26,17 @@ This is a clean replacement for the uploaded source. It uses:
    - receive `chat_member` updates.
 5. Start the service. Send `/start` to the bot as the owner, open **Admin panel**, add a channel by numeric ID, then add its plans.
 
+## Admin commands
+
+```text
+/addpremium <channel_id> <user_id> <duration_days>
+/removepremium <channel_id> <user_id>
+```
+
+Use `0` for a lifetime manual membership. Manual memberships use the same
+MongoDB subscription collection as paid and free plans, so the Premium users
+screen stays synchronized automatically.
+
 `DATABE_URL` is intentionally supported because it is the variable name from the request. `DATABASE_URL` is also accepted.
 
 ## Important payment/API note
@@ -32,7 +47,9 @@ The supplied configuration defaults to a 15-minute payment window. Set `PAYMENT_
 
 ## Telegram button colors
 
-Telegram's inline-button background colors are controlled by the Telegram client/theme rather than by bot code. The UI uses red/green/blue emoji prefixes so the action colors remain visible consistently across clients.
+Buttons send Telegram Bot API `style` values (`primary`, `success`, and
+`danger`) through python-telegram-bot's `api_kwargs`, with blue/green/red
+emoji fallbacks for older Telegram clients that ignore the style field.
 
 ## Security
 
