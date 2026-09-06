@@ -219,6 +219,53 @@ async def send_html(bot, chat_id: int, text: str, **kwargs):
     )
 
 
+async def replace_query_message(
+    query, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None
+):
+    """Edit text messages, but replace photo/media messages with a text screen.
+
+    Telegram cannot use editMessageText on a message whose content is a photo
+    or other media. The start screen may intentionally be a photo, so every
+    user navigation callback must handle both message shapes.
+    """
+    message = query.message
+    markup = reply_markup
+    if message and message.text is not None:
+        try:
+            return await message.edit_text(
+                small_caps_html(text),
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return message
+        except TelegramError:
+            pass
+    if message:
+        try:
+            await message.delete()
+        except TelegramError:
+            pass
+    chat_id = message.chat_id if message else query.from_user.id
+    return await context.bot.send_message(
+        chat_id=chat_id,
+        text=small_caps_html(text),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+
+async def delete_user_message(bot, user_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(user_id, message_id)
+    except TelegramError:
+        # It may already have been deleted by the user or by Telegram.
+        pass
+
+
 DEFAULT_WELCOME_TEXT = (
     quote("👤 <b>WELCOME</b>")
     + "\n\n"
@@ -262,13 +309,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-async def show_channels(query, db: MongoDatabase) -> None:
+async def show_channels(query, context: ContextTypes.DEFAULT_TYPE, db: MongoDatabase) -> None:
     channels = await db.list_channels()
     if not channels:
-        await query.edit_message_text(
+        await replace_query_message(
+            query,
+            context,
             quote("📭 <b>No memberships are available yet.</b>\nPlease check back soon."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
+            InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Back", callback_data="home")]]
             ),
         )
@@ -276,23 +324,26 @@ async def show_channels(query, db: MongoDatabase) -> None:
     buttons = [
         [
             InlineKeyboardButton(
-                f"🔵 {channel.get('title', 'Channel')[:40]}",
+                f"🔵 {(channel.get('button_text') or channel.get('title', 'Channel'))[:40]}",
                 callback_data=f"channel:{channel['_id']}",
             )
         ]
         for channel in channels
     ]
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="home")])
-    await query.edit_message_text(
+    await replace_query_message(
+        query,
+        context,
         quote("🛍️ <b>AVAILABLE CHANNELS</b>")
         + "\n\n"
         + quote("Choose a channel to view its description and plans."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        InlineKeyboardMarkup(buttons),
     )
 
 
-async def show_channel(query, db: MongoDatabase, channel_id: str) -> None:
+async def show_channel(
+    query, context: ContextTypes.DEFAULT_TYPE, db: MongoDatabase, channel_id: str
+) -> None:
     channel = await db.get_channel(channel_id)
     if not channel or not channel.get("active"):
         await query.answer("This channel is no longer available.", show_alert=True)
@@ -317,8 +368,8 @@ async def show_channel(query, db: MongoDatabase, channel_id: str) -> None:
     )
     if not plans:
         text += "\n" + quote("Plans are being prepared by the admin.")
-    await query.edit_message_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
+    await replace_query_message(
+        query, context, text, InlineKeyboardMarkup(buttons)
     )
 
 
@@ -333,12 +384,13 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     if float(plan["price"]) == 0:
         await activate_free_plan(context.application, query.from_user.id, channel, plan)
         await query.answer("Free access is being prepared.")
-        await query.edit_message_text(
+        await replace_query_message(
+            query,
+            context,
             quote("✅ <b>FREE ACCESS REQUESTED</b>")
             + "\n\n"
             + quote("Check your latest message for the join link or activation details."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
+            InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Home", callback_data="home")]]
             ),
         )
@@ -398,12 +450,13 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     await db.set_order_message(oid, sent.message_id)
     task = asyncio.create_task(payment_monitor(context.application, oid))
     payment_tasks(context)[oid] = task
-    await query.edit_message_text(
+    await replace_query_message(
+        query,
+        context,
         quote("✅ Payment screen created. Complete the payment using the QR above.")
         + "\n\n"
         + quote("The bot will verify it automatically. You can also tap <b>Check payment</b>."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
+        InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Choose another plan", callback_data=f"channel:{channel_id}")]]
         ),
     )
@@ -568,7 +621,7 @@ async def activate_free_plan(
         return
 
     end = None if duration <= 0 else now + timedelta(days=duration)
-    await db.create_subscription(
+    subscription_id = await db.create_subscription(
         {
             "user_id": user_id,
             "channel_id": channel["channel_id"],
@@ -584,7 +637,7 @@ async def activate_free_plan(
             "reminder_sent": False,
         }
     )
-    await send_html(
+    access_message = await send_html(
         application.bot,
         user_id,
         quote("✅ <b>FREE ACCESS GRANTED</b>")
@@ -598,6 +651,9 @@ async def activate_free_plan(
                 [contact_button()],
             ]
         ),
+    )
+    await db.update_subscription(
+        subscription_id, {"access_message_id": access_message.message_id}
     )
 
 
@@ -680,7 +736,7 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
 
     start = now
     end = None if duration <= 0 else start + timedelta(days=duration)
-    await db.create_subscription(
+    subscription_id = await db.create_subscription(
         {
             "user_id": order["user_id"],
             "channel_id": order["channel_id"],
@@ -696,7 +752,7 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
             "reminder_sent": False,
         }
     )
-    await send_html(
+    access_message = await send_html(
         application.bot,
         order["user_id"],
         quote("✅ <b>PAYMENT VERIFIED</b>")
@@ -712,6 +768,9 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
                 [contact_button()],
             ]
         ),
+    )
+    await db.update_subscription(
+        subscription_id, {"access_message_id": access_message.message_id}
     )
     await log_sale(application, order, txn, "new")
 
@@ -816,10 +875,13 @@ async def cancel_payment(query, context: ContextTypes.DEFAULT_TYPE, oid: str) ->
     if task:
         task.cancel()
     await query.answer("Payment cancelled.")
-    await query.edit_message_text(
-        quote("🔴 <b>PAYMENT CANCELLED</b>") + "\n\n" + quote("You can start a new order whenever you are ready."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=home_keyboard(False),
+    await replace_query_message(
+        query,
+        context,
+        quote("🔴 <b>PAYMENT CANCELLED</b>")
+        + "\n\n"
+        + quote("You can start a new order whenever you are ready."),
+        home_keyboard(False),
     )
 
 
@@ -837,10 +899,11 @@ async def show_access(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             ends = "Lifetime" if not sub.get("ends_at") else sub["ends_at"].strftime("%d %b %Y, %I:%M %p UTC")
             lines.append(f"• <b>{esc(sub.get('plan_name', 'Membership'))}</b> — {status} — {ends}")
         text = quote("🔐 <b>YOUR ACCESS</b>") + "\n\n" + quote("\n".join(lines))
-    await query.edit_message_text(
+    await replace_query_message(
+        query,
+        context,
         text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="home")]]),
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="home")]]),
     )
 
 
@@ -909,9 +972,16 @@ async def admin_channels(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     channels = await db.list_channels(active_only=False)
     buttons = [[InlineKeyboardButton("➕ Add channel", callback_data="admin:add_channel")]]
     for channel in channels:
-        state = "✅" if channel.get("active") else "⏸️"
+        state = "🟢" if channel.get("active") else "🔴"
+        label = channel.get("button_text") or channel.get("title", "Channel")
         buttons.append(
-            [InlineKeyboardButton(f"{state} {channel.get('title', 'Channel')[:35]}", callback_data=f"admin:channel:{channel['_id']}")]
+            [
+                InlineKeyboardButton(
+                    f"{state} {label[:35]}",
+                    callback_data=f"admin:channel:{channel['_id']}",
+                    style="success" if channel.get("active") else "danger",
+                )
+            ]
         )
     buttons.append([InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")])
     await admin_replace_query(
@@ -929,10 +999,25 @@ async def admin_channel(query, context: ContextTypes.DEFAULT_TYPE, channel_id: s
         await query.answer("Channel not found.", show_alert=True)
         return
     state = "Active" if channel.get("active") else "Paused"
+    state_button = (
+        InlineKeyboardButton(
+            "🟢 Active — click to pause",
+            callback_data=f"admin:toggle_channel:{channel_id}",
+            style="success",
+        )
+        if channel.get("active")
+        else InlineKeyboardButton(
+            "🔴 Paused — click to activate",
+            callback_data=f"admin:toggle_channel:{channel_id}",
+            style="danger",
+        )
+    )
     buttons = [
         [InlineKeyboardButton("🟢 Manage plans", callback_data=f"admin:channel_plans:{channel_id}")],
         [InlineKeyboardButton("✏️ Edit description", callback_data=f"admin:edit_desc:{channel_id}")],
-        [InlineKeyboardButton("⚪ Toggle active", callback_data=f"admin:toggle_channel:{channel_id}")],
+        [InlineKeyboardButton("✏️ Edit user button text", callback_data=f"admin:edit_button:{channel_id}")],
+        [state_button],
+        [InlineKeyboardButton("🔴 Delete channel", callback_data=f"admin:delete_channel_confirm:{channel_id}", style="danger")],
         [InlineKeyboardButton("⬅️ Channels", callback_data="admin:channels")],
     ]
     await admin_replace_query(
@@ -942,8 +1027,50 @@ async def admin_channel(query, context: ContextTypes.DEFAULT_TYPE, channel_id: s
         + "\n\n"
         + quote(f"ID: <code>{channel['channel_id']}</code>\nStatus: <b>{state}</b>")
         + "\n"
+        + quote(
+            f"User list button: <b>{esc(channel.get('button_text') or channel.get('title', 'Channel'))}</b>"
+        )
+        + "\n"
         + quote(esc(channel.get("description") or "No description")),
         InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_delete_channel_confirm(
+    query, context: ContextTypes.DEFAULT_TYPE, channel_id: str
+) -> None:
+    db = db_from(context)
+    channel = await db.get_channel(channel_id)
+    if not channel:
+        await query.answer("Channel not found.", show_alert=True)
+        return
+    await admin_replace_query(
+        query,
+        context,
+        quote("⚠️ <b>DELETE CHANNEL?</b>")
+        + "\n\n"
+        + quote(
+            f"This removes <b>{esc(channel.get('title', 'Channel'))}</b> and its plans from the user catalogue."
+        )
+        + "\n"
+        + quote("Existing subscription history is preserved, but this action cannot be undone from the panel."),
+        InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔴 Yes, delete it",
+                        callback_data=f"admin:delete_channel:{channel_id}",
+                        style="danger",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Keep channel",
+                        callback_data=f"admin:channel:{channel_id}",
+                    )
+                ],
+            ]
+        ),
     )
 
 
@@ -1068,6 +1195,26 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
                 context,
                 update.effective_chat.id,
                 quote("✅ <b>DESCRIPTION UPDATED</b>"),
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Channel",
+                                callback_data=f"admin:channel:{flow['channel_id']}",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        elif kind == "channel_button_text":
+            if not 1 <= len(value) <= 50:
+                raise ValueError("Button text must be between 1 and 50 characters.")
+            await db.update_channel(flow["channel_id"], button_text=value)
+            context.user_data.pop("admin_flow", None)
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("✅ <b>USER BUTTON TEXT UPDATED</b>"),
                 InlineKeyboardMarkup(
                     [
                         [
@@ -1304,6 +1451,11 @@ async def terminate_subscription(
         subscription["_id"],
         {"status": "terminated", "terminated_at": utcnow(), "invite_link": None},
     )
+    await delete_user_message(
+        application.bot,
+        subscription["user_id"],
+        subscription.get("access_message_id"),
+    )
     try:
         await application.bot.ban_chat_member(
             subscription["channel_id"], subscription["user_id"]
@@ -1393,14 +1545,15 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "home":
         await query.answer()
-        await query.edit_message_text(
+        await replace_query_message(
+            query,
+            context,
             quote("🏠 <b>MEMBERSHIP HOME</b>\nChoose an option below."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=home_keyboard(admin_only(query.from_user.id)),
+            home_keyboard(admin_only(query.from_user.id)),
         )
     elif data == "browse":
         await query.answer()
-        await show_channels(query, db)
+        await show_channels(query, context, db)
     elif data == "my_access":
         await query.answer()
         await show_access(query, context)
@@ -1412,7 +1565,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     elif data.startswith("channel:"):
         await query.answer()
-        await show_channel(query, db, data.split(":", 1)[1])
+        await show_channel(query, context, db, data.split(":", 1)[1])
     elif data.startswith("plan:"):
         _, channel_id, plan_id = data.split(":")
         await create_payment(update, context, channel_id, plan_id)
@@ -1465,11 +1618,38 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await admin_channel(query, context, data.split(":")[-1])
     elif data.startswith("admin:edit_desc:"):
         await begin_admin_flow(query, context, {"kind": "description", "channel_id": data.split(":")[-1]}, "Send the new channel description.")
+    elif data.startswith("admin:edit_button:"):
+        channel_id = data.split(":")[-1]
+        channel = await db.get_channel(channel_id)
+        if not channel:
+            await query.answer("Channel not found.", show_alert=True)
+            return
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "channel_button_text", "channel_id": channel_id},
+            "Send the text users should see in the Browse channels list.\n"
+            f"Current: <b>{esc(channel.get('button_text') or channel.get('title', 'Channel'))}</b>\n"
+            "Use up to 50 characters.",
+        )
     elif data.startswith("admin:toggle_channel:"):
         channel_id = data.split(":")[-1]
         channel = await db.get_channel(channel_id)
+        if not channel:
+            await query.answer("Channel not found.", show_alert=True)
+            return
         await db.update_channel(channel_id, active=not channel.get("active", True))
         await admin_channel(query, context, channel_id)
+    elif data.startswith("admin:delete_channel_confirm:"):
+        await admin_delete_channel_confirm(query, context, data.split(":")[-1])
+    elif data.startswith("admin:delete_channel:"):
+        channel_id = data.split(":")[-1]
+        channel = await db.get_channel(channel_id)
+        if not channel:
+            await query.answer("Channel already removed.", show_alert=True)
+            return
+        await db.delete_channel(channel_id)
+        await admin_channels(query, context)
     elif data.startswith("admin:channel_plans:"):
         await admin_channel_plans(query, context, data.split(":")[-1])
     elif data.startswith("admin:add_plan:"):
@@ -1487,7 +1667,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await admin_stats(query, context)
     elif data.startswith("renew:"):
         await query.answer()
-        await show_channel(query, db, data.split(":", 1)[1])
+        await show_channel(query, context, db, data.split(":", 1)[1])
     else:
         await query.answer()
 
@@ -1511,8 +1691,15 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     now = utcnow()
     duration = int(sub.get("duration_days", 0))
     end = None if duration <= 0 else now + timedelta(days=duration)
-    await db.update_subscription(sub["_id"], {"status": "active", "starts_at": now, "ends_at": end, "invite_link": None})
-    await send_html(
+    if not await db.claim_pending_join(sub["_id"], now, end):
+        # A duplicate Telegram update was already handled by another worker.
+        return
+    # Remove the earlier "access granted" message with the invite before
+    # sending the final activation confirmation.
+    await delete_user_message(
+        context.bot, user_id, sub.get("access_message_id")
+    )
+    activated_message = await send_html(
         context.bot,
         user_id,
         quote("🎉 <b>WELCOME — ACCESS ACTIVATED</b>")
@@ -1521,6 +1708,9 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         + "\n"
         + quote(f"Expires: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"),
         reply_markup=home_keyboard(False),
+    )
+    await db.update_subscription(
+        sub["_id"], {"access_message_id": activated_message.message_id}
     )
 
 
@@ -1644,7 +1834,7 @@ async def manual_add_premium(
     except TelegramError as exc:
         return f"Membership was recorded, but Telegram could not create an invite: {exc}"
 
-    await db.create_subscription(
+    subscription_id = await db.create_subscription(
         {
             "user_id": user_id,
             "channel_id": channel_id,
@@ -1661,7 +1851,7 @@ async def manual_add_premium(
         }
     )
     try:
-        await send_html(
+        access_message = await send_html(
             application.bot,
             user_id,
             quote("✅ <b>PREMIUM ACCESS GRANTED</b>")
@@ -1674,6 +1864,9 @@ async def manual_add_premium(
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)]]
             ),
+        )
+        await db.update_subscription(
+            subscription_id, {"access_message_id": access_message.message_id}
         )
         return f"Invite sent to {user_label} for {channel['title']}."
     except TelegramError:
@@ -1803,6 +1996,9 @@ def build_application() -> Application:
     app = (
         ApplicationBuilder()
         .token(settings.bot_token)
+        .concurrent_updates(32)
+        .connection_pool_size(64)
+        .pool_timeout(10)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
