@@ -15,7 +15,7 @@ import qrcode
 from telegram import (
     BotCommand,
     ChatMemberUpdated,
-    InlineKeyboardButton,
+    InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
 )
@@ -45,7 +45,7 @@ log = logging.getLogger("auto_membership_bot")
 ACTIVE_MEMBER_STATUSES = {"member", "administrator", "creator"}
 SMALL_CAPS = str.maketrans(
     "abcdefghijklmnopqrstuvwxyz",
-    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘQʀsᴛᴜᴠᴡxʏᴢ",
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ",
 )
 
 
@@ -57,8 +57,23 @@ def small_caps(value: str) -> str:
     return value.translate(SMALL_CAPS)
 
 
+def small_caps_html(value: str) -> str:
+    """Convert visible text while preserving HTML tags, links and code."""
+    protected = re.compile(
+        r"(<a\b[^>]*>.*?</a>|<code>.*?</code>|<pre>.*?</pre>|<[^>]+>)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    chunks = protected.split(value)
+    output = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        output.append(chunk if protected.fullmatch(chunk) else small_caps(chunk))
+    return "".join(output)
+
+
 def quote(text: str) -> str:
-    return f"<blockquote>{text}</blockquote>"
+    return f"<blockquote>{small_caps_html(text)}</blockquote>"
 
 
 def mention(user) -> str:
@@ -72,12 +87,35 @@ def admin_only(user_id: int) -> bool:
 admin_contact_override = settings.admin_contact
 
 
+def InlineKeyboardButton(text: str, *args, **kwargs):
+    """Use Bot API button styles while remaining compatible with PTB.
+
+    PTB 21.x exposes unknown Telegram fields through api_kwargs. This lets
+    Telegram clients that support Bot API 9.4 render primary/success/danger
+    buttons, while older clients simply ignore the extra field.
+    """
+    style = kwargs.pop("style", None)
+    if style is None:
+        if text.startswith("🔵"):
+            style = "primary"
+        elif text.startswith("🟢"):
+            style = "success"
+        elif text.startswith("🔴"):
+            style = "danger"
+    api_kwargs = dict(kwargs.pop("api_kwargs", {}) or {})
+    if style:
+        api_kwargs["style"] = style
+    return TelegramInlineKeyboardButton(
+        small_caps(text), *args, api_kwargs=api_kwargs or None, **kwargs
+    )
+
+
 def home_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🔵 Browse channels", callback_data="browse")],
         [
             InlineKeyboardButton("🟢 My access", callback_data="my_access"),
-            InlineKeyboardButton("💬 Contact admin", callback_data="contact"),
+            contact_button(),
         ],
     ]
     if is_admin:
@@ -91,6 +129,14 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔵 Channels", callback_data="admin:channels"),
                 InlineKeyboardButton("🟢 Plans", callback_data="admin:plans"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👥 Premium users", callback_data="admin:premium_users"
+                ),
+                InlineKeyboardButton(
+                    "🖼 Welcome setup", callback_data="admin:welcome"
+                ),
             ],
             [InlineKeyboardButton("⚙️ Contact settings", callback_data="admin:contact")],
             [InlineKeyboardButton("📊 Statistics", callback_data="admin:stats")],
@@ -107,6 +153,10 @@ def display_duration(days: int) -> str:
     if days % 7 == 0:
         return f"{days // 7} week(s)"
     return f"{days} day(s)"
+
+
+def format_price(price: float) -> str:
+    return "FREE" if float(price) == 0 else f"₹{float(price):.2f}"
 
 
 def order_id() -> str:
@@ -162,7 +212,31 @@ def payment_tasks(context: ContextTypes.DEFAULT_TYPE) -> dict:
 
 async def send_html(bot, chat_id: int, text: str, **kwargs):
     return await bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, **kwargs
+        chat_id=chat_id,
+        text=small_caps_html(text),
+        parse_mode=ParseMode.HTML,
+        **kwargs,
+    )
+
+
+DEFAULT_WELCOME_TEXT = (
+    quote("👤 <b>WELCOME</b>")
+    + "\n\n"
+    + quote("Hello {mention}, I am your membership assistant.")
+    + "\n"
+    + quote(
+        "Browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
+    )
+    + "\n\n"
+    + quote("Use the menu below to get started.")
+)
+
+
+async def welcome_content(db: MongoDatabase, user) -> str:
+    configured = await db.get_setting("welcome_text")
+    text = configured or DEFAULT_WELCOME_TEXT
+    return text.replace("{mention}", mention(user)).replace(
+        "{first_name}", esc(user.first_name or "there")
     )
 
 
@@ -170,24 +244,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     db = db_from(context)
     await db.upsert_user(user)
-    text = (
-        quote(f"👤 <b>{small_caps('WELCOME')}</b>")
-        + "\n\n"
-        + quote(
-            f"Hello {mention(user)}, {small_caps('I am your membership assistant.')}"
+    text = await welcome_content(db, user)
+    photo_id = await db.get_setting("welcome_photo_file_id")
+    markup = home_keyboard(admin_only(user.id))
+    if photo_id:
+        await update.effective_message.reply_photo(
+            photo=photo_id,
+            caption=small_caps_html(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
         )
-        + "\n"
-        + quote(
-            small_caps(
-                "Browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
-            )
+    else:
+        await update.effective_message.reply_text(
+            small_caps_html(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
         )
-        + "\n\n"
-        + quote("Use the menu below to get started.")
-    )
-    await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=home_keyboard(admin_only(user.id))
-    )
 
 
 async def show_channels(query, db: MongoDatabase) -> None:
@@ -229,7 +301,7 @@ async def show_channel(query, db: MongoDatabase, channel_id: str) -> None:
     buttons = [
         [
             InlineKeyboardButton(
-                f"🟢 {plan['name']} • ₹{plan['price']:.2f}",
+                f"🟢 {plan['name']} • {format_price(plan['price'])}",
                 callback_data=f"plan:{channel_id}:{plan['_id']}",
             )
         ]
@@ -257,6 +329,19 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     plan = await db.get_plan(plan_id)
     if not channel or not plan or not channel.get("active") or not plan.get("active"):
         await query.answer("This plan is no longer available.", show_alert=True)
+        return
+    if float(plan["price"]) == 0:
+        await activate_free_plan(context.application, query.from_user.id, channel, plan)
+        await query.answer("Free access is being prepared.")
+        await query.edit_message_text(
+            quote("✅ <b>FREE ACCESS REQUESTED</b>")
+            + "\n\n"
+            + quote("Check your latest message for the join link or activation details."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Home", callback_data="home")]]
+            ),
+        )
         return
     oid = order_id()
     expires_at = utcnow() + timedelta(minutes=payment_config.payment_max_minutes)
@@ -395,6 +480,125 @@ async def member_now(bot, user_id: int, chat_id: int) -> bool:
         return member.status in ACTIVE_MEMBER_STATUSES
     except TelegramError:
         return False
+
+
+async def activate_free_plan(
+    application: Application, user_id: int, channel: dict, plan: dict
+) -> None:
+    db: MongoDatabase = application.bot_data["db"]
+    now = utcnow()
+    duration = int(plan["duration_days"])
+    current = await db.find_subscription(user_id, channel["channel_id"], active_only=True)
+    already_member = await member_now(application.bot, user_id, channel["channel_id"])
+
+    if current and already_member:
+        start = max(now, current.get("ends_at") or now)
+        end = None if duration <= 0 else start + timedelta(days=duration)
+        await db.update_subscription(
+            current["_id"],
+            {
+                "ends_at": end,
+                "status": "active",
+                "reminder_sent": False,
+                "last_order_id": None,
+                "source": "free",
+            },
+        )
+        await send_html(
+            application.bot,
+            user_id,
+            quote("🎉 <b>FREE ACCESS EXTENDED</b>")
+            + "\n\n"
+            + quote(f"Plan: <b>{esc(plan['name'])}</b>")
+            + "\n"
+            + quote(
+                f"Valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"
+            ),
+            reply_markup=home_keyboard(False),
+        )
+        return
+
+    if already_member:
+        end = None if duration <= 0 else now + timedelta(days=duration)
+        await db.create_subscription(
+            {
+                "user_id": user_id,
+                "channel_id": channel["channel_id"],
+                "channel_doc_id": channel["_id"],
+                "plan_id": plan["_id"],
+                "plan_name": plan["name"],
+                "duration_days": duration,
+                "starts_at": now,
+                "ends_at": end,
+                "status": "active",
+                "source": "free",
+                "reminder_sent": False,
+            }
+        )
+        await send_html(
+            application.bot,
+            user_id,
+            quote("✅ <b>FREE ACCESS ACTIVATED</b>")
+            + "\n\n"
+            + quote(f"Plan: <b>{esc(plan['name'])}</b>")
+            + "\n"
+            + quote(
+                f"Valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"
+            ),
+            reply_markup=home_keyboard(False),
+        )
+        return
+
+    try:
+        invite = await application.bot.create_chat_invite_link(
+            chat_id=channel["channel_id"],
+            name=f"FREE-{new_id()[:8].upper()}",
+            expire_date=now + timedelta(minutes=30),
+            member_limit=1,
+        )
+    except TelegramError:
+        await send_html(
+            application.bot,
+            user_id,
+            quote("⚠️ <b>FREE ACCESS IS READY</b>")
+            + "\n\n"
+            + quote("The channel invite could not be created. Please contact admin."),
+            reply_markup=InlineKeyboardMarkup([[contact_button()]]),
+        )
+        return
+
+    end = None if duration <= 0 else now + timedelta(days=duration)
+    await db.create_subscription(
+        {
+            "user_id": user_id,
+            "channel_id": channel["channel_id"],
+            "channel_doc_id": channel["_id"],
+            "plan_id": plan["_id"],
+            "plan_name": plan["name"],
+            "duration_days": duration,
+            "starts_at": now,
+            "ends_at": end,
+            "status": "pending_join",
+            "source": "free",
+            "invite_link": invite.invite_link,
+            "reminder_sent": False,
+        }
+    )
+    await send_html(
+        application.bot,
+        user_id,
+        quote("✅ <b>FREE ACCESS GRANTED</b>")
+        + "\n\n"
+        + quote(f"Plan: <b>{esc(plan['name'])}</b>")
+        + "\n"
+        + quote("Tap below to join. Your membership timer starts after you join."),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)],
+                [contact_button()],
+            ]
+        ),
+    )
 
 
 async def activate_after_payment(application: Application, order: dict, txn: dict) -> None:
@@ -640,16 +844,63 @@ async def show_access(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def admin_screen(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    previous_message=None,
+) -> object:
+    """Replace the previous admin screen instead of stacking panel messages."""
+    old_message = previous_message
+    if old_message is None:
+        old_id = context.user_data.get("admin_panel_message_id")
+        old_chat_id = context.user_data.get("admin_panel_chat_id", chat_id)
+        if old_id:
+            try:
+                await context.bot.delete_message(old_chat_id, old_id)
+            except TelegramError:
+                pass
+    else:
+        try:
+            await old_message.delete()
+        except TelegramError:
+            pass
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=small_caps_html(text),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+    context.user_data["admin_panel_message_id"] = sent.message_id
+    context.user_data["admin_panel_chat_id"] = chat_id
+    return sent
+
+
+async def admin_replace_query(
+    query, context: ContextTypes.DEFAULT_TYPE, text: str, markup: InlineKeyboardMarkup
+) -> None:
+    await query.answer()
+    await admin_screen(
+        context,
+        query.message.chat_id,
+        text,
+        markup,
+        previous_message=query.message,
+    )
+
+
 async def admin_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not admin_only(query.from_user.id):
         await query.answer("Admin access only.", show_alert=True)
         return
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote("🔴 <b>ADMIN CONTROL PANEL</b>")
         + "\n\n"
         + quote("Manage sales channels, plans, pricing, durations, and support contact settings."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_keyboard(),
+        admin_keyboard(),
     )
 
 
@@ -663,10 +914,11 @@ async def admin_channels(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             [InlineKeyboardButton(f"{state} {channel.get('title', 'Channel')[:35]}", callback_data=f"admin:channel:{channel['_id']}")]
         )
     buttons.append([InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")])
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote("📣 <b>SALES CHANNELS</b>") + "\n\n" + quote("Add a channel ID, then configure its plans."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        InlineKeyboardMarkup(buttons),
     )
 
 
@@ -683,14 +935,15 @@ async def admin_channel(query, context: ContextTypes.DEFAULT_TYPE, channel_id: s
         [InlineKeyboardButton("⚪ Toggle active", callback_data=f"admin:toggle_channel:{channel_id}")],
         [InlineKeyboardButton("⬅️ Channels", callback_data="admin:channels")],
     ]
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote(f"📣 <b>{esc(channel.get('title'))}</b>")
         + "\n\n"
         + quote(f"ID: <code>{channel['channel_id']}</code>\nStatus: <b>{state}</b>")
         + "\n"
         + quote(esc(channel.get("description") or "No description")),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        InlineKeyboardMarkup(buttons),
     )
 
 
@@ -702,10 +955,11 @@ async def admin_plans(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         for c in channels
     ]
     buttons.append([InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")])
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote("🟢 <b>PLAN MANAGER</b>\nChoose a channel to add or edit its plans."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        InlineKeyboardMarkup(buttons),
     )
 
 
@@ -717,24 +971,30 @@ async def admin_channel_plans(query, context: ContextTypes.DEFAULT_TYPE, channel
     for plan in plans:
         state = "✅" if plan.get("active") else "⏸️"
         buttons.append(
-            [InlineKeyboardButton(f"{state} {plan['name']} • ₹{plan['price']:.2f}", callback_data=f"admin:edit_plan:{channel_id}:{plan['_id']}")]
+            [InlineKeyboardButton(f"{state} {plan['name']} • {format_price(plan['price'])}", callback_data=f"admin:edit_plan:{channel_id}:{plan['_id']}")]
         )
     buttons.append([InlineKeyboardButton("⬅️ Channel", callback_data=f"admin:channel:{channel_id}")])
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote(f"📦 <b>PLANS — {esc(channel.get('title', 'Channel'))}</b>")
         + "\n\n"
         + quote("Create custom durations in days. Use 0 days for lifetime."),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        InlineKeyboardMarkup(buttons),
     )
 
 
 async def begin_admin_flow(query, context: ContextTypes.DEFAULT_TYPE, flow: dict, prompt: str) -> None:
     context.user_data["admin_flow"] = flow
     await query.answer()
-    await query.message.reply_text(
+    await admin_screen(
+        context,
+        query.message.chat_id,
         quote(prompt) + "\n\n" + quote("Send /cancel to stop."),
-        parse_mode=ParseMode.HTML,
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+        ),
+        previous_message=query.message,
     )
 
 
@@ -745,9 +1005,18 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     if not flow:
         return False
     value = update.effective_message.text.strip()
+    try:
+        await update.effective_message.delete()
+    except TelegramError:
+        pass
     if value == "/cancel":
         context.user_data.pop("admin_flow", None)
-        await update.effective_message.reply_text("Cancelled.")
+        await admin_screen(
+            context,
+            update.effective_chat.id,
+            quote("🔴 <b>ACTION CANCELLED</b>"),
+            admin_keyboard(),
+        )
         return True
     db = db_from(context)
     kind = flow["kind"]
@@ -755,60 +1024,160 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
         if kind == "channel_id":
             channel_id = int(value)
             chat = await context.bot.get_chat(channel_id)
-            context.user_data["admin_flow"] = {"kind": "channel_description", "channel_id": channel_id, "title": chat.title or str(channel_id), "username": chat.username or ""}
-            await update.effective_message.reply_text(
+            context.user_data["admin_flow"] = {
+                "kind": "channel_description",
+                "channel_id": channel_id,
+                "title": chat.title or str(channel_id),
+                "username": chat.username or "",
+            }
+            await admin_screen(
+                context,
+                update.effective_chat.id,
                 quote(f"Found <b>{esc(chat.title or channel_id)}</b>.\nNow send the channel description."),
-                parse_mode=ParseMode.HTML,
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+                ),
             )
         elif kind == "channel_description":
             doc_id = await db.save_channel(flow["channel_id"], flow["title"], flow["username"], value)
             context.user_data.pop("admin_flow", None)
-            await update.effective_message.reply_text(
+            await admin_screen(
+                context,
+                update.effective_chat.id,
                 quote("✅ <b>CHANNEL SAVED</b>\nNow add plans from the admin panel."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 Manage plans", callback_data=f"admin:channel_plans:{doc_id}")]]),
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🟢 Manage plans",
+                                callback_data=f"admin:channel_plans:{doc_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Channels", callback_data="admin:channels"
+                            )
+                        ],
+                    ]
+                ),
             )
         elif kind == "description":
             await db.update_channel(flow["channel_id"], description=value)
             context.user_data.pop("admin_flow", None)
-            await update.effective_message.reply_text("✅ Description updated.")
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("✅ <b>DESCRIPTION UPDATED</b>"),
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Channel",
+                                callback_data=f"admin:channel:{flow['channel_id']}",
+                            )
+                        ]
+                    ]
+                ),
+            )
         elif kind == "contact":
             if not re.match(r"^(?:https?://t\.me/|@?)[A-Za-z0-9_]{3,}$", value):
                 raise ValueError("Use an @username or https://t.me/username.")
             global admin_contact_override
             admin_contact_override = value
-            # The environment variable is the deployment source of truth; this
-            # stores the admin override in Mongo so it can be changed in-app.
-            await db.db.settings.update_one({"_id": "global"}, {"$set": {"admin_contact": value}}, upsert=True)
+            await db.set_setting("admin_contact", value)
             context.user_data.pop("admin_flow", None)
-            await update.effective_message.reply_text("✅ Contact link updated.")
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("✅ <b>CONTACT LINK UPDATED</b>"),
+                admin_keyboard(),
+            )
         elif kind == "plan_name":
             context.user_data["admin_flow"] = {**flow, "kind": "plan_days", "name": value}
-            await update.effective_message.reply_text(quote("Send duration in days.\nUse <code>0</code> for lifetime."), parse_mode=ParseMode.HTML)
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("Send duration in days.\nUse <code>0</code> for lifetime."),
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+                ),
+            )
         elif kind == "plan_days":
             days = int(value)
             if days < 0 or days > 36500:
                 raise ValueError("Duration must be between 0 and 36500 days.")
             context.user_data["admin_flow"] = {**flow, "kind": "plan_price", "days": days}
-            await update.effective_message.reply_text("Send the price in INR, for example: 199")
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("Send the price in INR, for example: <code>199</code>.")
+                + "\n"
+                + quote("Use <code>0</code> to make this a free channel/plan."),
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+                ),
+            )
         elif kind == "plan_price":
             price = float(value)
-            if price <= 0 or price > 10_000_000:
-                raise ValueError("Price must be greater than zero.")
+            if price < 0 or price > 10_000_000:
+                raise ValueError("Price must be zero or greater.")
             context.user_data["admin_flow"] = {**flow, "kind": "plan_description", "price": price}
-            await update.effective_message.reply_text("Send a short plan description.")
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("Send a short plan description."),
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+                ),
+            )
         elif kind == "plan_description":
             plan_id = await db.save_plan(flow["channel_id"], flow["name"], flow["days"], flow["price"], value, flow.get("plan_id"))
             context.user_data.pop("admin_flow", None)
-            await update.effective_message.reply_text(
-                quote("✅ <b>PLAN SAVED</b>") + "\n\n" + quote("It is now visible to users if the channel is active."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Plan list", callback_data=f"admin:channel_plans:{flow['channel_id']}")]]),
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("✅ <b>PLAN SAVED</b>")
+                + "\n\n"
+                + quote(
+                    "It is now visible to users if the channel is active."
+                ),
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Plan list",
+                                callback_data=f"admin:channel_plans:{flow['channel_id']}",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        elif kind == "welcome_text":
+            if len(value) > 3500:
+                raise ValueError("Welcome text must be under 3500 characters.")
+            await db.set_setting("welcome_text", value)
+            context.user_data.pop("admin_flow", None)
+            await admin_screen(
+                context,
+                update.effective_chat.id,
+                quote("✅ <b>WELCOME MESSAGE UPDATED</b>"),
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Welcome setup", callback_data="admin:welcome")]]
+                ),
             )
         else:
             return False
     except (ValueError, TelegramError) as exc:
-        await update.effective_message.reply_text(f"Could not save that: {esc(exc)}\nPlease try again or use /cancel.", parse_mode=ParseMode.HTML)
+        await admin_screen(
+            context,
+            update.effective_chat.id,
+            quote(f"⚠️ <b>Could not save that:</b> {esc(exc)}")
+            + "\n\n"
+            + quote("Please send a corrected value or use /cancel."),
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")]]
+            ),
+        )
     return True
 
 
@@ -818,19 +1187,210 @@ async def admin_stats(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     channels = await db.count("channels", {"active": True})
     orders = await db.count("orders", {"status": "paid"})
     active = await db.count("subscriptions", {"status": "active"})
-    await query.edit_message_text(
+    await admin_replace_query(
+        query,
+        context,
         quote("📊 <b>BOT STATISTICS</b>")
         + "\n\n"
         + quote(f"Users: <b>{users}</b>\nActive channels: <b>{channels}</b>\nPaid orders: <b>{orders}</b>\nActive memberships: <b>{active}</b>"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")]]),
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")]]
+        ),
     )
+
+
+def format_expiry(value) -> str:
+    if not value:
+        return "Lifetime"
+    if isinstance(value, str):
+        return value[:19]
+    return value.strftime("%d %b %Y, %I:%M %p UTC")
+
+
+async def admin_premium_users(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = db_from(context)
+    users = await db.list_premium_users()
+    buttons = []
+    for user in users:
+        name = user.get("first_name") or "User"
+        username = f" @{user['username']}" if user.get("username") else ""
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"👤 {name}{username} • {user['telegram_id']}",
+                    callback_data=f"admin:user:{user['telegram_id']}",
+                )
+            ]
+        )
+    if not buttons:
+        buttons.append(
+            [InlineKeyboardButton("📭 No premium users yet", callback_data="admin:menu")]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")])
+    await admin_replace_query(
+        query,
+        context,
+        quote("👥 <b>PREMIUM USERS</b>")
+        + "\n\n"
+        + quote("Every user with a paid or manually granted membership is listed here."),
+        InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_user_detail(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    db = db_from(context)
+    user = await db.get_user(user_id)
+    subscriptions = await db.list_user_subscriptions(user_id)
+    if not user:
+        await query.answer("User not found.", show_alert=True)
+        return
+    display_name = esc(user.get("first_name") or "User")
+    username = f"@{esc(user['username'])}" if user.get("username") else "No username"
+    text = (
+        quote("👤 <b>PREMIUM USER DETAILS</b>")
+        + "\n\n"
+        + quote(
+            f"Name: <b>{display_name}</b>\nUsername: <code>{username}</code>\nTelegram ID: <code>{user_id}</code>"
+        )
+    )
+    buttons = []
+    for sub in subscriptions:
+        channel = await db.get_channel(sub.get("channel_doc_id", ""))
+        channel_name = channel.get("title") if channel else str(sub.get("channel_id"))
+        status = sub.get("status", "unknown")
+        text += "\n\n" + quote(
+            f"📣 <b>{esc(channel_name)}</b>\n"
+            f"Plan: <b>{esc(sub.get('plan_name', 'Membership'))}</b>\n"
+            f"Duration: {display_duration(int(sub.get('duration_days', 0)))}\n"
+            f"Bought: <code>{format_expiry(sub.get('created_at'))}</code>\n"
+            f"Source: <b>{esc(sub.get('source', 'payment'))}</b>\n"
+            f"Order: <code>{esc(sub.get('order_id', 'manual'))}</code>\n"
+            f"Status: <b>{esc(status)}</b>\n"
+            f"Expires: <code>{format_expiry(sub.get('ends_at'))}</code>"
+        )
+        if status in {"active", "pending_join"}:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"🔴 Terminate {channel_name[:24]}",
+                        callback_data=f"admin:terminate:{sub['_id']}",
+                    )
+                ]
+            )
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Premium users", callback_data="admin:premium_users"
+            )
+        ]
+    )
+    await admin_replace_query(query, context, text, InlineKeyboardMarkup(buttons))
+
+
+async def terminate_subscription(
+    application: Application, subscription: dict, notify_user: bool = True
+) -> None:
+    db: MongoDatabase = application.bot_data["db"]
+    if subscription.get("invite_link"):
+        try:
+            await application.bot.revoke_chat_invite_link(
+                subscription["channel_id"], subscription["invite_link"]
+            )
+        except TelegramError:
+            pass
+    await db.update_subscription(
+        subscription["_id"],
+        {"status": "terminated", "terminated_at": utcnow(), "invite_link": None},
+    )
+    try:
+        await application.bot.ban_chat_member(
+            subscription["channel_id"], subscription["user_id"]
+        )
+        await application.bot.unban_chat_member(
+            subscription["channel_id"],
+            subscription["user_id"],
+            only_if_banned=True,
+        )
+    except TelegramError as exc:
+        log.warning(
+            "Could not manually remove user %s from %s: %s",
+            subscription["user_id"],
+            subscription["channel_id"],
+            exc,
+        )
+    if notify_user:
+        try:
+            await send_html(
+                application.bot,
+                subscription["user_id"],
+                quote("🔴 <b>MEMBERSHIP TERMINATED</b>")
+                + "\n\n"
+                + quote("Your access was manually removed by admin."),
+                reply_markup=home_keyboard(False),
+            )
+        except TelegramError:
+            pass
+
+
+async def admin_welcome(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = db_from(context)
+    configured = await db.get_setting("welcome_text")
+    photo_id = await db.get_setting("welcome_photo_file_id")
+    preview = configured or "Default welcome message"
+    photo_state = "Configured" if photo_id else "Not configured"
+    buttons = [
+        [InlineKeyboardButton("✏️ Edit welcome text", callback_data="admin:welcome_text")],
+        [InlineKeyboardButton("🖼 Set welcome photo", callback_data="admin:set_welcome_photo")],
+        [InlineKeyboardButton("🗑 Remove welcome photo", callback_data="admin:remove_welcome_photo")],
+        [InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")],
+    ]
+    await admin_replace_query(
+        query,
+        context,
+        quote("🖼 <b>WELCOME / START SETUP</b>")
+        + "\n\n"
+        + quote(f"Photo: <b>{photo_state}</b>")
+        + "\n"
+        + quote(f"Text preview:\n<code>{esc(preview[:700])}</code>")
+        + "\n\n"
+        + quote("Supported placeholders: <code>{mention}</code> and <code>{first_name}</code>. HTML tags such as <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, and <code>&lt;blockquote&gt;</code> are supported."),
+        InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_user or not admin_only(update.effective_user.id):
+        return False
+    flow = context.user_data.get("admin_flow")
+    if not flow or flow.get("kind") != "welcome_photo":
+        return False
+    file_id = update.effective_message.photo[-1].file_id
+    try:
+        await update.effective_message.delete()
+    except TelegramError:
+        pass
+    await db_from(context).set_setting("welcome_photo_file_id", file_id)
+    context.user_data.pop("admin_flow", None)
+    await admin_screen(
+        context,
+        update.effective_chat.id,
+        quote("✅ <b>WELCOME PHOTO UPDATED</b>"),
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Welcome setup", callback_data="admin:welcome")]]
+        ),
+    )
+    return True
 
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = query.data or ""
     db = db_from(context)
+    if data.startswith("admin:") and not admin_only(query.from_user.id):
+        await query.answer("Admin access only.", show_alert=True)
+        return
     if data == "home":
         await query.answer()
         await query.edit_message_text(
@@ -846,9 +1406,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show_access(query, context)
     elif data == "contact":
         url = contact_url()
-        await query.answer("Opening admin contact…" if url else "Admin contact is not configured.", show_alert=not bool(url))
-        if url:
-            await query.message.reply_text(quote("💬 Tap below to contact the admin."), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Contact admin", url=url)]]))
+        await query.answer(
+            "Admin contact is not configured." if not url else "Use the contact button.",
+            show_alert=not bool(url),
+        )
     elif data.startswith("channel:"):
         await query.answer()
         await show_channel(query, db, data.split(":", 1)[1])
@@ -865,6 +1426,39 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await admin_channels(query, context)
     elif data == "admin:plans":
         await admin_plans(query, context)
+    elif data == "admin:premium_users":
+        await admin_premium_users(query, context)
+    elif data.startswith("admin:user:"):
+        await admin_user_detail(query, context, int(data.split(":")[-1]))
+    elif data.startswith("admin:terminate:"):
+        subscription = await db.get_subscription(data.split(":")[-1])
+        if not subscription:
+            await query.answer("Membership not found.", show_alert=True)
+            return
+        await terminate_subscription(context.application, subscription)
+        await admin_user_detail(query, context, subscription["user_id"])
+    elif data == "admin:welcome":
+        await admin_welcome(query, context)
+    elif data == "admin:welcome_text":
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "welcome_text"},
+            "Send the new /start message. Use HTML formatting and {mention} where the user name should appear.",
+        )
+    elif data == "admin:set_welcome_photo":
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "welcome_photo"},
+            "Send the photo to use with the /start message.",
+        )
+    elif data == "admin:remove_welcome_photo":
+        await db.set_setting("welcome_photo_file_id", None)
+        await admin_welcome(query, context)
+    elif data == "admin:cancel_flow":
+        context.user_data.pop("admin_flow", None)
+        await admin_menu(query, context)
     elif data == "admin:add_channel":
         await begin_admin_flow(query, context, {"kind": "channel_id"}, "Send the Telegram channel ID, for example <code>-1001234567890</code>.")
     elif data.startswith("admin:channel:"):
@@ -971,9 +1565,203 @@ async def maintenance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+async def manual_add_premium(
+    application: Application, channel_id: int, user_id: int, duration_days: int
+) -> str:
+    db: MongoDatabase = application.bot_data["db"]
+    channel = await db.get_channel_by_telegram_id(channel_id)
+    if not channel:
+        return "That channel is not configured in the admin panel."
+    if duration_days < 0 or duration_days > 36500:
+        return "Duration must be between 0 and 36500 days. Use 0 for lifetime."
+
+    try:
+        telegram_user = await application.bot.get_chat(user_id)
+        await db.upsert_user(telegram_user)
+        user_label = telegram_user.first_name or str(user_id)
+    except TelegramError:
+        existing = await db.get_user(user_id)
+        if not existing:
+            await db.db.users.update_one(
+                {"telegram_id": user_id},
+                {
+                    "$set": {
+                        "telegram_id": user_id,
+                        "first_name": "",
+                        "created_at": utcnow(),
+                        "updated_at": utcnow(),
+                    }
+                },
+                upsert=True,
+            )
+        user_label = str(user_id)
+
+    now = utcnow()
+    current = await db.find_subscription(user_id, channel_id, active_only=True)
+    already_member = await member_now(application.bot, user_id, channel_id)
+    end = None if duration_days == 0 else now + timedelta(days=duration_days)
+
+    if current and already_member:
+        start = max(now, current.get("ends_at") or now)
+        extended_end = None if duration_days == 0 else start + timedelta(days=duration_days)
+        await db.update_subscription(
+            current["_id"],
+            {
+                "ends_at": extended_end,
+                "status": "active",
+                "reminder_sent": False,
+                "source": "manual",
+                "last_manual_grant_at": now,
+            },
+        )
+        return f"Extended {user_label} in {channel['title']} until {format_expiry(extended_end)}."
+
+    if already_member:
+        await db.create_subscription(
+            {
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "channel_doc_id": channel["_id"],
+                "plan_id": "manual",
+                "plan_name": "Manual premium",
+                "duration_days": duration_days,
+                "starts_at": now,
+                "ends_at": end,
+                "status": "active",
+                "source": "manual",
+                "reminder_sent": False,
+            }
+        )
+        return f"Added {user_label} to {channel['title']} until {format_expiry(end)}."
+
+    try:
+        invite = await application.bot.create_chat_invite_link(
+            chat_id=channel_id,
+            name=f"MANUAL-{new_id()[:8].upper()}",
+            expire_date=now + timedelta(minutes=30),
+            member_limit=1,
+        )
+    except TelegramError as exc:
+        return f"Membership was recorded, but Telegram could not create an invite: {exc}"
+
+    await db.create_subscription(
+        {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "channel_doc_id": channel["_id"],
+            "plan_id": "manual",
+            "plan_name": "Manual premium",
+            "duration_days": duration_days,
+            "starts_at": now,
+            "ends_at": end,
+            "status": "pending_join",
+            "source": "manual",
+            "invite_link": invite.invite_link,
+            "reminder_sent": False,
+        }
+    )
+    try:
+        await send_html(
+            application.bot,
+            user_id,
+            quote("✅ <b>PREMIUM ACCESS GRANTED</b>")
+            + "\n\n"
+            + quote(f"Channel: <b>{esc(channel['title'])}</b>")
+            + "\n"
+            + quote(
+                f"Access: <code>{format_expiry(end)}</code>\nJoin using the single-use invite below."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)]]
+            ),
+        )
+        return f"Invite sent to {user_label} for {channel['title']}."
+    except TelegramError:
+        return f"Membership recorded and invite created, but I could not message user {user_id}."
+
+
+async def manual_remove_premium(
+    application: Application, channel_id: int, user_id: int
+) -> str:
+    db: MongoDatabase = application.bot_data["db"]
+    records = await db.terminate_user_subscriptions(user_id, channel_id)
+    if not records:
+        return "No active or pending premium membership was found for that user and channel."
+    for record in records:
+        await terminate_subscription(application, record)
+    return f"Terminated {len(records)} membership record(s) and removed user {user_id}."
+
+
+async def addpremium_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not admin_only(update.effective_user.id):
+        return
+    args = context.args
+    try:
+        if len(args) != 3:
+            raise ValueError("Usage: /addpremium <channel_id> <user_id> <duration_days>")
+        result = await manual_add_premium(
+            context.application, int(args[0]), int(args[1]), int(args[2])
+        )
+    except ValueError as exc:
+        result = str(exc)
+    try:
+        await update.effective_message.delete()
+    except TelegramError:
+        pass
+    await send_html(context.bot, update.effective_chat.id, quote(f"🟢 {esc(result)}"))
+
+
+async def removepremium_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not admin_only(update.effective_user.id):
+        return
+    args = context.args
+    try:
+        if len(args) != 2:
+            raise ValueError("Usage: /removepremium <channel_id> <user_id>")
+        result = await manual_remove_premium(
+            context.application, int(args[0]), int(args[1])
+        )
+    except ValueError as exc:
+        result = str(exc)
+    try:
+        await update.effective_message.delete()
+    except TelegramError:
+        pass
+    await send_html(context.bot, update.effective_chat.id, quote(f"🔴 {esc(result)}"))
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        quote("ℹ️ <b>HELP</b>")
+        + "\n\n"
+        + quote("Use /start to browse channels and memberships.")
+        + "\n"
+        + quote("If a payment is pending, use the check button on its payment screen.")
+    )
+    await update.effective_message.reply_text(
+        small_caps_html(text),
+        parse_mode=ParseMode.HTML,
+        reply_markup=home_keyboard(admin_only(update.effective_user.id)),
+    )
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("admin_flow", None)
-    await update.effective_message.reply_text("Cancelled.")
+    try:
+        await update.effective_message.delete()
+    except TelegramError:
+        pass
+    if admin_only(update.effective_user.id):
+        await admin_screen(
+            context,
+            update.effective_chat.id,
+            quote("🔴 <b>ACTION CANCELLED</b>"),
+            admin_keyboard(),
+        )
 
 
 async def post_init(application: Application) -> None:
@@ -982,14 +1770,16 @@ async def post_init(application: Application) -> None:
     await db.connect()
     application.bot_data["db"] = db
     application.bot_data["payment_tasks"] = {}
-    saved_contact = await db.db.settings.find_one({"_id": "global"})
-    if saved_contact and saved_contact.get("admin_contact"):
-        admin_contact_override = saved_contact["admin_contact"]
+    saved_contact = await db.get_setting("admin_contact")
+    if saved_contact:
+        admin_contact_override = saved_contact
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Open the membership menu"),
             BotCommand("help", "Show help"),
             BotCommand("cancel", "Cancel the current action"),
+            BotCommand("addpremium", "Admin: grant premium access"),
+            BotCommand("removepremium", "Admin: remove premium access"),
         ]
     )
     application.job_queue.run_repeating(maintenance_job, interval=300, first=20)
@@ -1018,9 +1808,13 @@ def build_application() -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("addpremium", addpremium_command))
+    app.add_handler(CommandHandler("removepremium", removepremium_command))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.PHOTO, admin_photo), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
     app.add_error_handler(error_handler)
     return app
