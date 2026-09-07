@@ -16,6 +16,8 @@ This is a clean replacement for the uploaded source. It uses:
 - Custom user-facing channel button labels, active/paused status colors, and two-step channel deletion
 - Channel preview galleries with up to 10 admin-uploaded images
 - Optional images for access-granted and access-activated screens, with formatted-text fallbacks
+- Editable access-granted, access-activated, and Browse channels messages with guided placeholders
+- Animated admin control-panel header with a text fallback if Telegram cannot fetch the remote GIF
 - Safe navigation from both text and photo-based `/start` screens
 - Join activation cleanup: the earlier invite message is deleted before the final access-confirmation message
 
@@ -63,6 +65,19 @@ formatted text screens remain unchanged.
 The blue, green, and red emoji prefixes are removed from rendered buttons. The
 Telegram button styles remain active, so supported clients still show the
 primary, success, and danger colors.
+
+The admin panel is organized as **Manage setup**, containing:
+
+- Access message setup → separate access-granted and access-activated setup
+  screens, each with image add/remove and message editing;
+- Available channels message → image add/remove and message editing;
+- Welcome / Start setup;
+- Contact settings.
+
+Access-message placeholders are `{mention}`, `{first_name}`, `{channel_name}`,
+`{plan_name}`, `{expiry}`, and `{order_id}`. HTML tags are supported. The
+mention placeholder is protected from small-caps conversion and rendered as a
+real Telegram user mention.
 
 ## Admin commands
 
