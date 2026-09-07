@@ -14,6 +14,8 @@ This is a clean replacement for the uploaded source. It uses:
 - Single-use, time-limited Telegram invite links
 - Join detection, invite revocation, expiry reminders, and automatic removal after expiry
 - Custom user-facing channel button labels, active/paused status colors, and two-step channel deletion
+- Channel preview galleries with up to 10 admin-uploaded images
+- Optional images for access-granted and access-activated screens, with formatted-text fallbacks
 - Safe navigation from both text and photo-based `/start` screens
 - Join activation cleanup: the earlier invite message is deleted before the final access-confirmation message
 
@@ -50,6 +52,17 @@ Open **Admin panel → Channels → a channel** to:
   Telegram channel title;
 - delete the channel from the catalogue. The panel asks for a second
   confirmation, removes its plans, and preserves old subscription history.
+
+After saving a channel, use **Set channel preview images** to upload one or
+more photos and tap **Done**. Users see the gallery first, followed by the
+channel description and plan buttons. Use **Admin panel → Access screen images**
+to configure separate images for the invite/access-granted message and the
+post-join/access-activated message. If no image is configured, the existing
+formatted text screens remain unchanged.
+
+The blue, green, and red emoji prefixes are removed from rendered buttons. The
+Telegram button styles remain active, so supported clients still show the
+primary, success, and danger colors.
 
 ## Admin commands
 
