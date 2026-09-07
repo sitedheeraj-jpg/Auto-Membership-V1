@@ -15,6 +15,7 @@ import qrcode
 from telegram import (
     BotCommand,
     ChatMemberUpdated,
+    InputMediaPhoto,
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -94,14 +95,18 @@ def InlineKeyboardButton(text: str, *args, **kwargs):
     Telegram clients that support Bot API 9.4 render primary/success/danger
     buttons, while older clients simply ignore the extra field.
     """
+    original_text = text
     style = kwargs.pop("style", None)
     if style is None:
-        if text.startswith("🔵"):
+        if original_text.startswith("🔵"):
             style = "primary"
-        elif text.startswith("🟢"):
+        elif original_text.startswith("🟢"):
             style = "success"
-        elif text.startswith("🔴"):
+        elif original_text.startswith("🔴"):
             style = "danger"
+    # Keep the style signal internally, but do not show the color emoji in
+    # the rendered button label.
+    text = re.sub(r"^[🔵🟢🔴]\s*", "", text)
     api_kwargs = dict(kwargs.pop("api_kwargs", {}) or {})
     if style:
         api_kwargs["style"] = style
@@ -137,6 +142,11 @@ def admin_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "🖼 Welcome setup", callback_data="admin:welcome"
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎨 Access screen images", callback_data="admin:access_images"
+                )
             ],
             [InlineKeyboardButton("⚙️ Contact settings", callback_data="admin:contact")],
             [InlineKeyboardButton("📊 Statistics", callback_data="admin:stats")],
@@ -219,6 +229,44 @@ async def send_html(bot, chat_id: int, text: str, **kwargs):
     )
 
 
+async def send_screen(
+    application: Application,
+    chat_id: int,
+    text: str,
+    setting_key: str,
+    reply_markup=None,
+):
+    """Send an optional image screen, falling back to formatted text."""
+    db: MongoDatabase = application.bot_data["db"]
+    photo_id = await db.get_setting(setting_key)
+    if photo_id:
+        try:
+            return await application.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_id,
+                caption=small_caps_html(text),
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+        except TelegramError as exc:
+            log.warning("Could not send configured screen image %s: %s", setting_key, exc)
+    return await send_html(
+        application.bot, chat_id, text, reply_markup=reply_markup
+    )
+
+
+async def clear_preview_media(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    """Remove the previous channel gallery before navigating elsewhere."""
+    message_ids = context.user_data.pop("channel_preview_message_ids", [])
+    for message_id in message_ids:
+        try:
+            await context.bot.delete_message(chat_id, message_id)
+        except TelegramError:
+            pass
+
+
 async def replace_query_message(
     query, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None
 ):
@@ -229,6 +277,9 @@ async def replace_query_message(
     user navigation callback must handle both message shapes.
     """
     message = query.message
+    await clear_preview_media(
+        context, message.chat_id if message else query.from_user.id
+    )
     markup = reply_markup
     if message and message.text is not None:
         try:
@@ -269,15 +320,13 @@ async def delete_user_message(bot, user_id: int, message_id: int | None) -> None
 DEFAULT_WELCOME_TEXT = (
     quote("👤 <b>WELCOME</b>")
     + "\n\n"
-    + quote("hello ")
-    + "{mention}, "
-    + quote("i am your membership assistant.")
+    + quote("Hello {mention}, I am your membership assistant.")
     + "\n"
     + quote(
-        "browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
+        "Browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
     )
     + "\n\n"
-    + quote("use the menu below to get started.")
+    + quote("Use the menu below to get started.")
 )
 
 
@@ -370,9 +419,47 @@ async def show_channel(
     )
     if not plans:
         text += "\n" + quote("Plans are being prepared by the admin.")
-    await replace_query_message(
-        query, context, text, InlineKeyboardMarkup(buttons)
-    )
+    markup = InlineKeyboardMarkup(buttons)
+    image_ids = [
+        image_id
+        for image_id in channel.get("preview_image_file_ids", [])
+        if image_id
+    ]
+    if not image_ids:
+        await replace_query_message(query, context, text, markup)
+        return
+
+    chat_id = query.message.chat_id if query.message else query.from_user.id
+    await clear_preview_media(context, chat_id)
+    if query.message:
+        try:
+            await query.message.delete()
+        except TelegramError:
+            pass
+    try:
+        gallery = await context.bot.send_media_group(
+            chat_id=chat_id,
+            media=[InputMediaPhoto(media=image_id) for image_id in image_ids[:10]],
+        )
+        context.user_data["channel_preview_message_ids"] = [
+            message.message_id for message in gallery
+        ]
+        details_message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=small_caps_html(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+        return details_message
+    except TelegramError as exc:
+        log.warning("Could not send channel preview gallery for %s: %s", channel_id, exc)
+        context.user_data.pop("channel_preview_message_ids", None)
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            text=small_caps_html(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
 
 
 async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str, plan_id: str) -> None:
@@ -590,8 +677,8 @@ async def activate_free_plan(
                 "reminder_sent": False,
             }
         )
-        await send_html(
-            application.bot,
+        await send_screen(
+            application,
             user_id,
             quote("✅ <b>FREE ACCESS ACTIVATED</b>")
             + "\n\n"
@@ -600,6 +687,7 @@ async def activate_free_plan(
             + quote(
                 f"Valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"
             ),
+            "access_activated_photo_file_id",
             reply_markup=home_keyboard(False),
         )
         return
@@ -639,14 +727,15 @@ async def activate_free_plan(
             "reminder_sent": False,
         }
     )
-    access_message = await send_html(
-        application.bot,
+    access_message = await send_screen(
+        application,
         user_id,
         quote("✅ <b>FREE ACCESS GRANTED</b>")
         + "\n\n"
         + quote(f"Plan: <b>{esc(plan['name'])}</b>")
         + "\n"
         + quote("Tap below to join. Your membership timer starts after you join."),
+        "access_granted_photo_file_id",
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)],
@@ -702,14 +791,15 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
                 "reminder_sent": False,
             }
         )
-        await send_html(
-            application.bot,
+        await send_screen(
+            application,
             order["user_id"],
             quote("🎉 <b>MEMBERSHIP ACTIVATED</b>")
             + "\n\n"
             + quote(f"Plan: <b>{esc(order['plan_name'])}</b>")
             + "\n"
             + quote(f"Valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"),
+            "access_activated_photo_file_id",
             reply_markup=home_keyboard(False),
         )
         await log_sale(application, order, txn, "new")
@@ -754,8 +844,8 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
             "reminder_sent": False,
         }
     )
-    access_message = await send_html(
-        application.bot,
+    access_message = await send_screen(
+        application,
         order["user_id"],
         quote("✅ <b>PAYMENT VERIFIED</b>")
         + "\n\n"
@@ -764,6 +854,7 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
         + quote("Tap the invite below to join. It is single-use and expires shortly.")
         + "\n\n"
         + quote("Your membership timer begins when you join the channel."),
+        "access_granted_photo_file_id",
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)],
@@ -872,18 +963,32 @@ async def cancel_payment(query, context: ContextTypes.DEFAULT_TYPE, oid: str) ->
         await query.answer("This order is already closed.", show_alert=True)
         return
     await db.update_order(oid, {"status": "cancelled"})
-    await delete_payment_message(context.bot, order)
     task = payment_tasks(context).pop(oid, None)
     if task:
         task.cancel()
     await query.answer("Payment cancelled.")
-    await replace_query_message(
-        query,
-        context,
+    await delete_payment_message(context.bot, order, include_notice=True)
+    try:
+        await query.message.delete()
+    except TelegramError:
+        pass
+    await send_html(
+        context.bot,
+        query.from_user.id,
         quote("🔴 <b>PAYMENT CANCELLED</b>")
         + "\n\n"
-        + quote("You can start a new order whenever you are ready."),
-        home_keyboard(False),
+        + quote("The QR payment message was removed. You can choose another plan below."),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🟢 Choose another plan",
+                        callback_data=f"channel:{order['channel_doc_id']}",
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ Home", callback_data="home")],
+            ]
+        ),
     )
 
 
@@ -1018,6 +1123,7 @@ async def admin_channel(query, context: ContextTypes.DEFAULT_TYPE, channel_id: s
         [InlineKeyboardButton("🟢 Manage plans", callback_data=f"admin:channel_plans:{channel_id}")],
         [InlineKeyboardButton("✏️ Edit description", callback_data=f"admin:edit_desc:{channel_id}")],
         [InlineKeyboardButton("✏️ Edit user button text", callback_data=f"admin:edit_button:{channel_id}")],
+        [InlineKeyboardButton("🖼 Set channel preview images", callback_data=f"admin:channel_images:{channel_id}")],
         [state_button],
         [InlineKeyboardButton("🔴 Delete channel", callback_data=f"admin:delete_channel_confirm:{channel_id}", style="danger")],
         [InlineKeyboardButton("⬅️ Channels", callback_data="admin:channels")],
@@ -1180,6 +1286,12 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
                             InlineKeyboardButton(
                                 "🟢 Manage plans",
                                 callback_data=f"admin:channel_plans:{doc_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🖼 Set channel preview images",
+                                callback_data=f"admin:channel_images:{doc_id}",
                             )
                         ],
                         [
@@ -1514,25 +1626,137 @@ async def admin_welcome(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def admin_access_images(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = db_from(context)
+    granted = await db.get_setting("access_granted_photo_file_id")
+    activated = await db.get_setting("access_activated_photo_file_id")
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "🖼 Set access granted image",
+                callback_data="admin:set_access_granted",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 Remove granted image",
+                callback_data="admin:remove_access_granted",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🖼 Set access activated image",
+                callback_data="admin:set_access_activated",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 Remove activated image",
+                callback_data="admin:remove_access_activated",
+            )
+        ],
+        [InlineKeyboardButton("⬅️ Panel", callback_data="admin:menu")],
+    ]
+    await admin_replace_query(
+        query,
+        context,
+        quote("🎨 <b>ACCESS SCREEN IMAGES</b>")
+        + "\n\n"
+        + quote(
+            f"Access granted image: <b>{'Configured' if granted else 'Default text'}</b>\n"
+            f"Access activated image: <b>{'Configured' if activated else 'Default text'}</b>"
+        )
+        + "\n\n"
+        + quote(
+            "Granted is shown with the invite link after payment. Activated is shown after the user joins."
+        ),
+        InlineKeyboardMarkup(buttons),
+    )
+
+
+async def finish_channel_images(
+    query, context: ContextTypes.DEFAULT_TYPE, channel_id: str
+) -> None:
+    db = db_from(context)
+    flow = context.user_data.pop("admin_flow", {})
+    images = flow.get("images", [])
+    await db.update_channel(channel_id, preview_image_file_ids=images[:10])
+    await admin_replace_query(
+        query,
+        context,
+        quote("✅ <b>CHANNEL PREVIEW IMAGES UPDATED</b>")
+        + "\n\n"
+        + quote(
+            f"{len(images[:10])} image(s) will be shown before the channel description and plans."
+        ),
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Channel", callback_data=f"admin:channel:{channel_id}")]]
+        ),
+    )
+
+
 async def admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.effective_user or not admin_only(update.effective_user.id):
         return False
     flow = context.user_data.get("admin_flow")
-    if not flow or flow.get("kind") != "welcome_photo":
+    if not flow or flow.get("kind") not in {
+        "welcome_photo",
+        "channel_images",
+        "access_granted_photo",
+        "access_activated_photo",
+    }:
         return False
     file_id = update.effective_message.photo[-1].file_id
     try:
         await update.effective_message.delete()
     except TelegramError:
         pass
-    await db_from(context).set_setting("welcome_photo_file_id", file_id)
+    kind = flow["kind"]
+    if kind == "channel_images":
+        images = [*flow.get("images", []), file_id][:10]
+        context.user_data["admin_flow"] = {**flow, "images": images}
+        await admin_screen(
+            context,
+            update.effective_chat.id,
+            quote(f"✅ <b>PREVIEW IMAGE {len(images)}/10 ADDED</b>")
+            + "\n\n"
+            + quote("Send another photo or tap Done to save this gallery."),
+            InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🟢 Done",
+                            callback_data=f"admin:channel_images_done:{flow['channel_id']}",
+                        )
+                    ],
+                    [InlineKeyboardButton("🔴 Cancel", callback_data="admin:cancel_flow")],
+                ]
+            ),
+        )
+        return True
+
+    setting_key = {
+        "welcome_photo": "welcome_photo_file_id",
+        "access_granted_photo": "access_granted_photo_file_id",
+        "access_activated_photo": "access_activated_photo_file_id",
+    }[kind]
+    await db_from(context).set_setting(setting_key, file_id)
     context.user_data.pop("admin_flow", None)
+    if kind == "welcome_photo":
+        back_callback = "admin:welcome"
+        confirmation = "WELCOME PHOTO UPDATED"
+    elif kind == "access_granted_photo":
+        back_callback = "admin:access_images"
+        confirmation = "ACCESS GRANTED IMAGE UPDATED"
+    else:
+        back_callback = "admin:access_images"
+        confirmation = "ACCESS ACTIVATED IMAGE UPDATED"
     await admin_screen(
         context,
         update.effective_chat.id,
-        quote("✅ <b>WELCOME PHOTO UPDATED</b>"),
+        quote(f"✅ <b>{confirmation}</b>"),
         InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Welcome setup", callback_data="admin:welcome")]]
+            [[InlineKeyboardButton("⬅️ Back", callback_data=back_callback)]]
         ),
     )
     return True
@@ -1594,6 +1818,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await admin_user_detail(query, context, subscription["user_id"])
     elif data == "admin:welcome":
         await admin_welcome(query, context)
+    elif data == "admin:access_images":
+        await admin_access_images(query, context)
     elif data == "admin:welcome_text":
         await begin_admin_flow(
             query,
@@ -1608,9 +1834,29 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             {"kind": "welcome_photo"},
             "Send the photo to use with the /start message.",
         )
+    elif data == "admin:set_access_granted":
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "access_granted_photo"},
+            "Send the image to use when access is granted and the invite link is sent.",
+        )
+    elif data == "admin:set_access_activated":
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "access_activated_photo"},
+            "Send the image to use after the user joins and access is activated.",
+        )
     elif data == "admin:remove_welcome_photo":
         await db.set_setting("welcome_photo_file_id", None)
         await admin_welcome(query, context)
+    elif data == "admin:remove_access_granted":
+        await db.set_setting("access_granted_photo_file_id", None)
+        await admin_access_images(query, context)
+    elif data == "admin:remove_access_activated":
+        await db.set_setting("access_activated_photo_file_id", None)
+        await admin_access_images(query, context)
     elif data == "admin:cancel_flow":
         context.user_data.pop("admin_flow", None)
         await admin_menu(query, context)
@@ -1634,6 +1880,21 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Current: <b>{esc(channel.get('button_text') or channel.get('title', 'Channel'))}</b>\n"
             "Use up to 50 characters.",
         )
+    elif data.startswith("admin:channel_images:"):
+        channel_id = data.split(":")[-1]
+        channel = await db.get_channel(channel_id)
+        if not channel:
+            await query.answer("Channel not found.", show_alert=True)
+            return
+        await begin_admin_flow(
+            query,
+            context,
+            {"kind": "channel_images", "channel_id": channel_id, "images": []},
+            "Send one or more channel preview photos, one at a time.\n"
+            "This replaces the current gallery. You can add up to 10 images, then tap Done.",
+        )
+    elif data.startswith("admin:channel_images_done:"):
+        await finish_channel_images(query, context, data.split(":")[-1])
     elif data.startswith("admin:toggle_channel:"):
         channel_id = data.split(":")[-1]
         channel = await db.get_channel(channel_id)
@@ -1701,14 +1962,15 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await delete_user_message(
         context.bot, user_id, sub.get("access_message_id")
     )
-    activated_message = await send_html(
-        context.bot,
+    activated_message = await send_screen(
+        context.application,
         user_id,
         quote("🎉 <b>WELCOME — ACCESS ACTIVATED</b>")
         + "\n\n"
         + quote(f"Plan: <b>{esc(sub.get('plan_name'))}</b>")
         + "\n"
         + quote(f"Expires: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"),
+        "access_activated_photo_file_id",
         reply_markup=home_keyboard(False),
     )
     await db.update_subscription(
@@ -1853,8 +2115,8 @@ async def manual_add_premium(
         }
     )
     try:
-        access_message = await send_html(
-            application.bot,
+        access_message = await send_screen(
+            application,
             user_id,
             quote("✅ <b>PREMIUM ACCESS GRANTED</b>")
             + "\n\n"
@@ -1863,6 +2125,7 @@ async def manual_add_premium(
             + quote(
                 f"Access: <code>{format_expiry(end)}</code>\nJoin using the single-use invite below."
             ),
+            "access_granted_photo_file_id",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)]]
             ),
