@@ -143,7 +143,7 @@ def InlineKeyboardButton(text: str, *args, **kwargs):
 
 def home_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🔵 browse channels", callback_data="browse")],
+        [InlineKeyboardButton("🔵 buy membership", callback_data="browse")],
         [
             InlineKeyboardButton("🟢 my memberships", callback_data="my_access"),
             contact_button(),
@@ -1937,7 +1937,7 @@ async def admin_available_channels(query, context: ContextTypes.DEFAULT_TYPE) ->
         )
         + "\n\n"
         + quote(
-            "This message appears when the user taps Browse channels. "
+            "This message appears when the user taps buy membership. "
             "HTML formatting is supported."
         ),
         InlineKeyboardMarkup(
@@ -2158,7 +2158,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             query,
             context,
             {"kind": "available_channels_photo"},
-            "Send the image to show with the Browse channels message.",
+            "Send the image to show with the buy membership message.",
         )
     elif data == "admin:edit_access_granted_message":
         await begin_admin_flow(
@@ -2186,7 +2186,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             query,
             context,
             {"kind": "available_channels_message"},
-            "Send the Browse channels message.\n\n"
+            "Send the buy membership message.\n\n"
             "HTML and <blockquote> are supported. This message appears above "
             "the available channel buttons.",
         )
@@ -2221,7 +2221,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             query,
             context,
             {"kind": "channel_button_text", "channel_id": channel_id},
-            "Send the text users should see in the Browse channels list.\n"
+            "Send the text users should see in the buy membership list.\n"
             f"Current: <b>{esc(channel.get('button_text') or channel.get('title', 'Channel'))}</b>\n"
             "Use up to 50 characters.",
         )
@@ -2547,7 +2547,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (
         quote("ℹ️ <b>HELP</b>")
         + "\n\n"
-        + quote("Use /start to browse channels and memberships.")
+        + quote("Use /start to buy membership and memberships.")
         + "\n"
         + quote("If a payment is pending, use the check button on its payment screen.")
     )
