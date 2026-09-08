@@ -143,14 +143,14 @@ def InlineKeyboardButton(text: str, *args, **kwargs):
 
 def home_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🔵 Browse channels", callback_data="browse")],
+        [InlineKeyboardButton("🔵 browse channels", callback_data="browse")],
         [
-            InlineKeyboardButton("🟢 My access", callback_data="my_access"),
+            InlineKeyboardButton("🟢 my memberships", callback_data="my_access"),
             contact_button(),
         ],
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("🔴 Admin panel", callback_data="admin:menu")])
+        rows.append([InlineKeyboardButton("🔴 admin panel", callback_data="admin:menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -158,17 +158,17 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🔵 Channels", callback_data="admin:channels"),
-                InlineKeyboardButton("🟢 Plans", callback_data="admin:plans"),
+                InlineKeyboardButton("🔵 channels", callback_data="admin:channels"),
+                InlineKeyboardButton("🟢 plans", callback_data="admin:plans"),
             ],
             [
                 InlineKeyboardButton(
-                    "👥 Premium users", callback_data="admin:premium_users"
+                    "👥 premium users", callback_data="admin:premium_users"
                 ),
-                InlineKeyboardButton("⚙️ Manage setup", callback_data="admin:setup"),
+                InlineKeyboardButton("⚙️ manage setup", callback_data="admin:setup"),
             ],
-            [InlineKeyboardButton("📊 Statistics", callback_data="admin:stats")],
-            [InlineKeyboardButton("⬅️ User menu", callback_data="home")],
+            [InlineKeyboardButton("📊 statistics", callback_data="admin:stats")],
+            [InlineKeyboardButton("⬅️ user menu", callback_data="home")],
         ]
     )
 
@@ -203,8 +203,8 @@ def contact_url() -> str | None:
 def contact_button() -> InlineKeyboardButton:
     url = contact_url()
     if url:
-        return InlineKeyboardButton("💬 Contact admin", url=url)
-    return InlineKeyboardButton("💬 Contact admin", callback_data="contact")
+        return InlineKeyboardButton("💬 contact admin", url=url)
+    return InlineKeyboardButton("💬 contact admin", callback_data="contact")
 
 
 def upi_uri(amount: float, oid: str) -> str:
@@ -374,41 +374,41 @@ async def delete_user_message(bot, user_id: int, message_id: int | None) -> None
 DEFAULT_WELCOME_TEXT = (
     quote("👤 <b>WELCOME</b>")
     + "\n\n"
-    + quote("Hello {mention}, I am your membership assistant.")
+    + quote("hello {mention} 👋, I am your membership assistant.")
     + "\n"
     + quote(
-        "Browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
+        "browse a channel, choose a plan, pay securely by UPI, and receive a private invite link."
     )
     + "\n\n"
-    + quote("Use the menu below to get started.")
+    + quote("use the menu below to get started.")
 )
 
 DEFAULT_AVAILABLE_CHANNELS_MESSAGE = (
     quote("🛍️ <b>AVAILABLE CHANNELS</b>")
     + "\n\n"
-    + quote("Choose a channel to view its description and plans.")
+    + quote("choose a channel to view its description and plans.")
 )
 
 DEFAULT_ACCESS_GRANTED_MESSAGE = (
     quote("✅ <b>ACCESS GRANTED</b>")
     + "\n\n"
-    + quote("Channel: <b>{channel_name}</b>")
+    + quote("channel: <b>{channel_name}</b>")
     + "\n"
-    + quote("Plan: <b>{plan_name}</b>")
+    + quote("plan: <b>{plan_name}</b>")
     + "\n"
-    + quote("Expires: <code>{expiry}</code>")
+    + quote("expires: <code>{expiry}</code>")
     + "\n\n"
-    + quote("Tap below to join. Your membership timer starts after you join.")
+    + quote("tap below to join. your membership timer starts after you join.")
 )
 
 DEFAULT_ACCESS_ACTIVATED_MESSAGE = (
     quote("🎉 <b>WELCOME — ACCESS ACTIVATED</b>")
     + "\n\n"
-    + quote("Channel: <b>{channel_name}</b>")
+    + quote("channel: <b>{channel_name}</b>")
     + "\n"
-    + quote("Plan: <b>{plan_name}</b>")
+    + quote("plan: <b>{plan_name}</b>")
     + "\n"
-    + quote("Expires: <code>{expiry}</code>")
+    + quote("expires: <code>{expiry}</code>")
 )
 
 
@@ -467,10 +467,10 @@ async def show_channels(query, context: ContextTypes.DEFAULT_TYPE, db: MongoData
             context,
             channels_message
             + "\n\n"
-            + quote("📭 <b>No memberships are available yet.</b>\nPlease check back soon."),
+            + quote("📭 <b>no memberships are available yet.</b>\nplease check back soon."),
             "available_channels_photo_file_id",
             InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Back", callback_data="home")]]
+                [[InlineKeyboardButton("⬅️ back", callback_data="home")]]
             ),
         )
         return
@@ -483,7 +483,7 @@ async def show_channels(query, context: ContextTypes.DEFAULT_TYPE, db: MongoData
         ]
         for channel in channels
     ]
-    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="home")])
+    buttons.append([InlineKeyboardButton("⬅️ back", callback_data="home")])
     await replace_query_with_optional_photo(
         query,
         context,
@@ -510,16 +510,16 @@ async def show_channel(
         ]
         for plan in plans
     ]
-    buttons.append([InlineKeyboardButton("⬅️ Channels", callback_data="browse")])
+    buttons.append([InlineKeyboardButton("⬅️ channels", callback_data="browse")])
     text = (
-        quote(f"📣 <b>{esc(channel.get('title', 'Membership'))}</b>")
+        quote(f"📣 <b>{esc(channel.get('title', 'membership'))}</b>")
         + "\n\n"
-        + quote(esc(channel.get("description") or "Choose a plan below."))
+        + quote(esc(channel.get("description") or "choose a plan below."))
         + "\n\n"
         + quote("💳 <b>Plans</b>")
     )
     if not plans:
-        text += "\n" + quote("Plans are being prepared by the admin.")
+        text += "\n" + quote("plans are being prepared by the admin.")
     markup = InlineKeyboardMarkup(buttons)
     image_ids = [
         image_id
@@ -579,9 +579,9 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
             context,
             quote("✅ <b>FREE ACCESS REQUESTED</b>")
             + "\n\n"
-            + quote("Check your latest message for the join link or activation details."),
+            + quote("check your latest message for the join link or activation details."),
             InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Home", callback_data="home")]]
+                [[InlineKeyboardButton("⬅️ home", callback_data="home")]]
             ),
         )
         return
@@ -608,24 +608,24 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     caption = (
         quote("💳 <b>PAYMENT REQUEST</b>")
         + "\n\n"
-        + quote(f"📣 Channel: <b>{esc(channel.get('title'))}</b>")
+        + quote(f"📣 channel: <b>{esc(channel.get('title'))}</b>")
         + "\n"
-        + quote(f"📦 Plan: <b>{esc(plan['name'])}</b> • {display_duration(int(plan['duration_days']))}")
+        + quote(f"📦 plan: <b>{esc(plan['name'])}</b> • {display_duration(int(plan['duration_days']))}")
         + "\n"
-        + quote(f"💰 Amount: <b>₹{float(plan['price']):.2f}</b>")
+        + quote(f"💰 amount: <b>₹{float(plan['price']):.2f}</b>")
         + "\n"
-        + quote(f"🆔 Order: <code>{oid}</code>")
+        + quote(f"🆔 order: <code>{oid}</code>")
         + "\n\n"
         + quote(
-            f"Scan the QR or pay to <code>{esc(payment_config.upi_id)}</code>."
-            f"\nThis order expires in {payment_config.payment_max_minutes} minutes."
+            f"scan the QR or pay to <code>{esc(payment_config.upi_id)}</code>."
+            f"\nthis order expires in {payment_config.payment_max_minutes} minutes."
         )
     )
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🟢 Check payment", callback_data=f"paycheck:{oid}")],
+            [InlineKeyboardButton("🟢 check payment", callback_data=f"paycheck:{oid}")],
             [
-                InlineKeyboardButton("🔴 Cancel", callback_data=f"paycancel:{oid}"),
+                InlineKeyboardButton("🔴 cancel", callback_data=f"paycancel:{oid}"),
                 contact_button(),
             ],
         ]
@@ -644,11 +644,11 @@ async def create_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     await replace_query_message(
         query,
         context,
-        quote("✅ Payment screen created. Complete the payment using the QR above.")
+        quote("✅ payment screen created. complete the payment using the QR above.")
         + "\n\n"
-        + quote("The bot will verify it automatically. You can also tap <b>Check payment</b>."),
+        + quote("the bot will verify it automatically. you can also tap <b>check payment</b>."),
         InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Choose another plan", callback_data=f"channel:{channel_id}")]]
+            [[InlineKeyboardButton("⬅️ choose another plan", callback_data=f"channel:{channel_id}")]]
         ),
     )
     await db.update_order(oid, {"notice_message_id": query.message.message_id})
@@ -753,10 +753,10 @@ async def activate_free_plan(
             user_id,
             quote("🎉 <b>FREE ACCESS EXTENDED</b>")
             + "\n\n"
-            + quote(f"Plan: <b>{esc(plan['name'])}</b>")
+            + quote(f"plan: <b>{esc(plan['name'])}</b>")
             + "\n"
             + quote(
-                f"Valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"
+                f"valid until: <code>{end.strftime('%d %b %Y, %I:%M %p UTC') if end else 'Lifetime'}</code>"
             ),
             reply_markup=home_keyboard(False),
         )
@@ -811,7 +811,7 @@ async def activate_free_plan(
             user_id,
             quote("⚠️ <b>FREE ACCESS IS READY</b>")
             + "\n\n"
-            + quote("The channel invite could not be created. Please contact admin."),
+            + quote("the channel invite could not be created. please contact admin."),
             reply_markup=InlineKeyboardMarkup([[contact_button()]]),
         )
         return
@@ -850,7 +850,7 @@ async def activate_free_plan(
         "access_granted_photo_file_id",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)],
+                [InlineKeyboardButton("🔵 join channel", url=invite.invite_link)],
                 [contact_button()],
             ]
         ),
@@ -878,9 +878,9 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
             order["user_id"],
             quote("🎉 <b>MEMBERSHIP EXTENDED</b>")
             + "\n\n"
-            + quote(f"Plan: <b>{esc(order['plan_name'])}</b>")
+            + quote(f"plan: <b>{esc(order['plan_name'])}</b>")
             + "\n"
-            + quote(f"Valid until: <code>{end.isoformat() if end else 'Lifetime'}</code>"),
+            + quote(f"valid until: <code>{end.isoformat() if end else 'Lifetime'}</code>"),
             reply_markup=home_keyboard(False),
         )
         await log_sale(application, order, txn, "extended")
@@ -937,9 +937,9 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
             order["user_id"],
             quote("⚠️ <b>PAYMENT RECEIVED</b>")
             + "\n\n"
-            + quote("Your payment is recorded, but the channel invite could not be created.")
+            + quote("your payment is recorded, but the channel invite could not be created.")
             + "\n"
-            + quote(f"Please contact admin with order <code>{order['order_id']}</code>."),
+            + quote(f"please contact admin with order <code>{order['order_id']}</code>."),
             reply_markup=InlineKeyboardMarkup([[contact_button()]]),
         )
         return
@@ -979,7 +979,7 @@ async def activate_after_payment(application: Application, order: dict, txn: dic
         "access_granted_photo_file_id",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🔵 Join channel", url=invite.invite_link)],
+                [InlineKeyboardButton("🔵 join channel", url=invite.invite_link)],
                 [contact_button()],
             ]
         ),
@@ -996,17 +996,17 @@ async def log_sale(application: Application, order: dict, txn: dict, kind: str) 
     text = (
         quote(f"💰 <b>NEW SALE • {kind.upper()}</b>")
         + "\n\n"
-        + quote(f"👤 User: <code>{order['user_id']}</code>")
+        + quote(f"👤 user: <code>{order['user_id']}</code>")
         + "\n"
-        + quote(f"📣 Channel: <code>{order['channel_id']}</code>")
+        + quote(f"📣 channel: <code>{order['channel_id']}</code>")
         + "\n"
-        + quote(f"📦 Plan: <b>{esc(order['plan_name'])}</b>")
+        + quote(f"📦 plan: <b>{esc(order['plan_name'])}</b>")
         + "\n"
-        + quote(f"💳 Amount: <b>₹{float(order['amount']):.2f}</b>")
+        + quote(f"💳 amount: <b>₹{float(order['amount']):.2f}</b>")
         + "\n"
-        + quote(f"🆔 Order: <code>{order['order_id']}</code>")
+        + quote(f"🆔 order: <code>{order['order_id']}</code>")
         + "\n"
-        + quote(f"🏦 Transaction: <code>{esc(txn.get('txn_id') or 'N/A')}</code>")
+        + quote(f"🏦 transaction: <code>{esc(txn.get('txn_id') or 'N/A')}</code>")
     )
     try:
         await send_html(application.bot, payment_config.payment_log_channel_id, text)
@@ -1030,9 +1030,9 @@ async def payment_monitor(application: Application, oid: str) -> None:
                     order["user_id"],
                     quote("⏰ <b>PAYMENT SESSION EXPIRED</b>")
                     + "\n\n"
-                    + quote("No payment was detected within the allowed window.")
+                    + quote("no payment was detected within the allowed window.")
                     + "\n"
-                    + quote("If you paid, contact admin with your order ID."),
+                    + quote("if you paid, contact admin with your order ID."),
                     reply_markup=InlineKeyboardMarkup([[contact_button()]]),
                 )
                 return
@@ -1065,11 +1065,11 @@ async def check_payment(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
             query.from_user.id,
             quote("🔎 <b>PAYMENT NOT DETECTED YET</b>")
             + "\n\n"
-            + quote("If you have just paid, wait a little and try again. The automatic checker is still running."),
+            + quote("if you have just paid, wait a little and try again. the automatic checker is still running."),
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("🟢 Check again", callback_data=f"paycheck:{oid}")],
-                    [InlineKeyboardButton("🔴 Cancel", callback_data=f"paycancel:{oid}")],
+                    [InlineKeyboardButton("🟢 check again", callback_data=f"paycheck:{oid}")],
+                    [InlineKeyboardButton("🔴 cancel", callback_data=f"paycancel:{oid}")],
                 ]
             ),
         )
@@ -1099,16 +1099,16 @@ async def cancel_payment(query, context: ContextTypes.DEFAULT_TYPE, oid: str) ->
         query.from_user.id,
         quote("🔴 <b>PAYMENT CANCELLED</b>")
         + "\n\n"
-        + quote("The QR payment message was removed. You can choose another plan below."),
+        + quote("the QR payment message was removed. you can choose another plan below."),
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "🟢 Choose another plan",
+                        "🟢 choose another plan",
                         callback_data=f"channel:{order['channel_doc_id']}",
                     )
                 ],
-                [InlineKeyboardButton("⬅️ Home", callback_data="home")],
+                [InlineKeyboardButton("⬅️ home", callback_data="home")],
             ]
         ),
     )
